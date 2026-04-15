@@ -466,6 +466,39 @@ def parse_args() -> argparse.Namespace:
         "MAX_UPLOAD_SIZE", 104857600, int, special_none=True
     )
 
+    # Sidecar-based multimodal ingestion configuration
+    args.raganything_sidecar_enabled = get_env_value(
+        "RAGANYTHING_SIDECAR_ENABLED", False, bool
+    )
+    args.raganything_job_spool_dir = get_env_value(
+        "RAGANYTHING_JOB_SPOOL_DIR", "./job_spool"
+    )
+    args.raganything_output_dir = get_env_value(
+        "RAGANYTHING_OUTPUT_DIR", "./raganything_output"
+    )
+    args.raganything_parser = get_env_value("RAGANYTHING_PARSER", "mineru")
+    args.raganything_parse_method = get_env_value(
+        "RAGANYTHING_PARSE_METHOD", "auto"
+    )
+    args.raganything_enable_image_processing = get_env_value(
+        "RAGANYTHING_ENABLE_IMAGE_PROCESSING", True, bool
+    )
+    args.raganything_enable_table_processing = get_env_value(
+        "RAGANYTHING_ENABLE_TABLE_PROCESSING", True, bool
+    )
+    args.raganything_enable_equation_processing = get_env_value(
+        "RAGANYTHING_ENABLE_EQUATION_PROCESSING", True, bool
+    )
+    args.raganything_vision_model = get_env_value(
+        "RAGANYTHING_VISION_MODEL", "gpt-5.4-mini"
+    )
+    args.raganything_poll_interval_seconds = get_env_value(
+        "RAGANYTHING_POLL_INTERVAL_SECONDS", 5, int
+    )
+    args.raganything_max_retries = get_env_value(
+        "RAGANYTHING_MAX_RETRIES", 3, int
+    )
+
     ollama_server_infos.LIGHTRAG_NAME = args.simulated_model_name
     ollama_server_infos.LIGHTRAG_TAG = args.simulated_model_tag
 

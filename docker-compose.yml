@@ -1,11 +1,11 @@
 services:
   lightrag:
-    image: ghcr.io/hkuds/lightrag:latest
+    image: lightrag-local:latest
     build:
       context: .
       dockerfile: Dockerfile
       tags:
-        - ghcr.io/hkuds/lightrag:latest
+        - lightrag-local:latest
     ports:
       - "${HOST:-0.0.0.0}:${PORT:-9621}:9621"
     volumes:
@@ -24,3 +24,20 @@ services:
       INPUT_DIR: "/app/data/inputs"
       HOST: "0.0.0.0"
       PORT: "9621"
+  lightrag-raganything-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.raganything
+    depends_on:
+      - lightrag
+    volumes:
+      - ./data/rag_storage:/app/data/rag_storage
+      - ./data/inputs:/app/data/inputs
+      - ./job_spool:/app/data/job_spool
+      - ./raganything_output:/app/data/raganything_output
+      - ./.env:/app/.env
+    environment:
+      WORKING_DIR: "/app/data/rag_storage"
+      INPUT_DIR: "/app/data/inputs"
+      RAGANYTHING_JOB_SPOOL_DIR: "/app/data/job_spool"
+      RAGANYTHING_OUTPUT_DIR: "/app/data/raganything_output"

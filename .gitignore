@@ -53,6 +53,8 @@ inputs/
 output/
 rag_storage/
 data/
+job_spool/
+raganything_output/
 
 # Evaluation results
 lightrag/evaluation/results/

@@ -31,6 +31,7 @@ from lightrag.utils import (
     sanitize_text_for_encoding,
 )
 from lightrag.api.utils_api import get_combined_auth_dependency
+from lightrag.sidecar.jobs import SidecarJobQueue, sidecar_job_to_doc_status_payload
 from ..config import global_args
 
 
@@ -98,6 +99,41 @@ def normalize_file_path(file_path: str | None) -> str:
         return UNKNOWN_FILE_SOURCE
 
     return normalized
+
+
+def _is_raganything_sidecar_enabled() -> bool:
+    return bool(getattr(global_args, "raganything_sidecar_enabled", False))
+
+
+def _get_sidecar_queue() -> SidecarJobQueue:
+    return SidecarJobQueue(getattr(global_args, "raganything_job_spool_dir", "./job_spool"))
+
+
+async def _enqueue_sidecar_jobs(
+    rag: LightRAG, file_paths: list[Path], track_id: str
+) -> tuple[int, int]:
+    queue = _get_sidecar_queue()
+    enqueued = 0
+    skipped = 0
+
+    for file_path in file_paths:
+        if queue.find_active_job(input_path=file_path, workspace=rag.workspace):
+            skipped += 1
+            continue
+
+        job = queue.create_job(
+            track_id=track_id,
+            workspace=rag.workspace,
+            input_path=file_path,
+            original_filename=file_path.name,
+            parser=getattr(global_args, "raganything_parser", "mineru"),
+            parse_method=getattr(global_args, "raganything_parse_method", "auto"),
+            metadata={"content_length": file_path.stat().st_size},
+        )
+        queue.enqueue(job)
+        enqueued += 1
+
+    return enqueued, skipped
 
 
 def sanitize_filename(filename: str, input_dir: Path) -> str:
@@ -2107,6 +2143,40 @@ def create_document_routes(
         # Generate track_id with "scan" prefix for scanning operation
         track_id = generate_track_id("scan")
 
+        if _is_raganything_sidecar_enabled():
+            new_files = doc_manager.scan_directory_for_new_files()
+            valid_files: list[Path] = []
+
+            for file_path in new_files:
+                filename = file_path.name
+                existing_doc_data = await rag.doc_status.get_doc_by_file_path(filename)
+                if existing_doc_data and existing_doc_data.get("status") == "processed":
+                    logger.warning("Skipping already processed file: %s", filename)
+                    continue
+                valid_files.append(file_path)
+
+            if not valid_files:
+                return ScanResponse(
+                    status="scanning_started",
+                    message="No eligible files found to queue for sidecar processing.",
+                    track_id=track_id,
+                )
+
+            enqueued_count, skipped_count = await _enqueue_sidecar_jobs(
+                rag, valid_files, track_id
+            )
+            message = (
+                f"Queued {enqueued_count} files for sidecar multimodal processing."
+            )
+            if skipped_count:
+                message += f" Skipped {skipped_count} files that are already queued."
+
+            return ScanResponse(
+                status="scanning_started",
+                message=message,
+                track_id=track_id,
+            )
+
         # Start the scanning process in the background with track_id
         background_tasks.add_task(run_scanning_process, rag, doc_manager, track_id)
         return ScanResponse(
@@ -2182,6 +2252,8 @@ def create_document_routes(
                     detail=f"Unsupported file type. Supported types: {doc_manager.supported_extensions}",
                 )
 
+            file_size = None
+
             # Check file size limit (if configured)
             if (
                 global_args.max_upload_size is not None
@@ -2219,10 +2291,17 @@ def create_document_routes(
             file_path = doc_manager.input_dir / safe_filename
             # Check if file already exists in file system
             if file_path.exists():
+                existing_track_id = ""
+                if _is_raganything_sidecar_enabled():
+                    active_job = _get_sidecar_queue().find_active_job(
+                        input_path=file_path, workspace=rag.workspace
+                    )
+                    if active_job is not None:
+                        existing_track_id = active_job.track_id
                 return InsertResponse(
                     status="duplicated",
                     message=f"File '{safe_filename}' already exists in the input directory.",
-                    track_id="",
+                    track_id=existing_track_id,
                 )
 
             # Async streaming write with size check
@@ -2266,8 +2345,23 @@ def create_document_routes(
 
             track_id = generate_track_id("upload")
 
-            # Add to background tasks and get track_id
-            background_tasks.add_task(pipeline_index_file, rag, file_path, track_id)
+            if _is_raganything_sidecar_enabled():
+                queue = _get_sidecar_queue()
+                job = queue.create_job(
+                    track_id=track_id,
+                    workspace=rag.workspace,
+                    input_path=file_path,
+                    original_filename=safe_filename,
+                    parser=getattr(global_args, "raganything_parser", "mineru"),
+                    parse_method=getattr(global_args, "raganything_parse_method", "auto"),
+                    metadata={
+                        "content_length": file_size if file_size is not None else bytes_written
+                    },
+                )
+                queue.enqueue(job)
+            else:
+                # Add to background tasks and get track_id
+                background_tasks.add_task(pipeline_index_file, rag, file_path, track_id)
 
             return InsertResponse(
                 status="success",
@@ -3072,28 +3166,44 @@ def create_document_routes(
             # Convert to response format
             documents = []
             status_summary = {}
+            indexed_paths = set()
 
             for doc_id, doc_status in docs_by_track_id.items():
-                documents.append(
-                    DocStatusResponse(
-                        id=doc_id,
-                        content_summary=doc_status.content_summary,
-                        content_length=doc_status.content_length,
-                        status=doc_status.status,
-                        created_at=format_datetime(doc_status.created_at),
-                        updated_at=format_datetime(doc_status.updated_at),
-                        track_id=doc_status.track_id,
-                        chunks_count=doc_status.chunks_count,
-                        error_msg=doc_status.error_msg,
-                        metadata=doc_status.metadata,
-                        file_path=normalize_file_path(doc_status.file_path),
-                    )
+                response_doc = DocStatusResponse(
+                    id=doc_id,
+                    content_summary=doc_status.content_summary,
+                    content_length=doc_status.content_length,
+                    status=doc_status.status,
+                    created_at=format_datetime(doc_status.created_at),
+                    updated_at=format_datetime(doc_status.updated_at),
+                    track_id=doc_status.track_id,
+                    chunks_count=doc_status.chunks_count,
+                    error_msg=doc_status.error_msg,
+                    metadata=doc_status.metadata,
+                    file_path=normalize_file_path(doc_status.file_path),
                 )
+                documents.append(response_doc)
+                indexed_paths.add(normalize_file_path(response_doc.file_path))
 
                 # Build status summary
                 # Handle both DocStatus enum and string cases for robust deserialization
-                status_key = str(doc_status.status)
+                status_key = str(response_doc.status)
                 status_summary[status_key] = status_summary.get(status_key, 0) + 1
+
+            if _is_raganything_sidecar_enabled():
+                for job in _get_sidecar_queue().list_jobs_by_track_id(track_id):
+                    normalized_path = normalize_file_path(job.original_filename)
+                    if normalized_path in indexed_paths:
+                        continue
+
+                    response_doc = DocStatusResponse(
+                        **sidecar_job_to_doc_status_payload(job)
+                    )
+                    documents.append(response_doc)
+                    indexed_paths.add(normalized_path)
+
+                    status_key = str(response_doc.status)
+                    status_summary[status_key] = status_summary.get(status_key, 0) + 1
 
             return TrackStatusResponse(
                 track_id=track_id,
