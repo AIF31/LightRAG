@@ -76,6 +76,22 @@ def get_default_host(binding_type: str) -> str:
     )  # fallback to ollama if unknown
 
 
+def _parse_extension_list(value: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    if not value:
+        return default
+
+    extensions: list[str] = []
+    for item in value.split(","):
+        ext = item.strip().lower()
+        if not ext:
+            continue
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        extensions.append(ext)
+
+    return tuple(extensions) if extensions else default
+
+
 def validate_auth_configuration(args: argparse.Namespace) -> None:
     """Reject insecure JWT auth settings before the API starts."""
     auth_accounts = (getattr(args, "auth_accounts", "") or "").strip()
@@ -497,6 +513,33 @@ def parse_args() -> argparse.Namespace:
     )
     args.raganything_max_retries = get_env_value(
         "RAGANYTHING_MAX_RETRIES", 3, int
+    )
+    args.raganything_fast_path_extensions = _parse_extension_list(
+        get_env_value(
+            "RAGANYTHING_FAST_PATH_EXTENSIONS",
+            ".txt,.md,.mdx,.html,.htm,.json,.xml,.yaml,.yml,.csv,.log,.conf,.ini,.properties,.sql,.bat,.sh,.c,.h,.cpp,.hpp,.py,.java,.js,.ts,.swift,.go,.rb,.php,.css,.scss,.less,.rtf,.odt,.epub,.tex",
+        ),
+        (),
+    )
+    args.raganything_docling_extensions = _parse_extension_list(
+        get_env_value("RAGANYTHING_DOCLING_EXTENSIONS", ".docx,.pptx"),
+        (),
+    )
+    args.raganything_mineru_extensions = _parse_extension_list(
+        get_env_value("RAGANYTHING_MINERU_EXTENSIONS", ".pdf,.xlsx"),
+        (),
+    )
+    args.raganything_mineru_backend = get_env_value(
+        "RAGANYTHING_MINERU_BACKEND", "pipeline"
+    )
+    args.raganything_mineru_device = get_env_value(
+        "RAGANYTHING_MINERU_DEVICE", "cpu"
+    )
+    args.raganything_mineru_table = get_env_value(
+        "RAGANYTHING_MINERU_TABLE", True, bool
+    )
+    args.raganything_mineru_formula = get_env_value(
+        "RAGANYTHING_MINERU_FORMULA", True, bool
     )
 
     ollama_server_infos.LIGHTRAG_NAME = args.simulated_model_name

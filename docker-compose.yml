@@ -11,6 +11,7 @@ services:
     volumes:
       - ./data/rag_storage:/app/data/rag_storage
       - ./data/inputs:/app/data/inputs
+      - ./job_spool:/app/data/job_spool
       - ./config.ini:/app/config.ini
       - ./.env:/app/.env
     deploy:
@@ -24,6 +25,10 @@ services:
       INPUT_DIR: "/app/data/inputs"
       HOST: "0.0.0.0"
       PORT: "9621"
+      RERANK_BINDING_HOST: "http://vllm-rerank:8000/rerank"
+    depends_on:
+      vllm-rerank:
+        condition: service_healthy
   lightrag-raganything-worker:
     build:
       context: .
@@ -41,3 +46,28 @@ services:
       INPUT_DIR: "/app/data/inputs"
       RAGANYTHING_JOB_SPOOL_DIR: "/app/data/job_spool"
       RAGANYTHING_OUTPUT_DIR: "/app/data/raganything_output"
+
+  vllm-rerank:
+    image: vllm/vllm-openai-cpu:latest
+    command: >
+      --model ${VLLM_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      --port ${VLLM_RERANK_PORT:-8000}
+      --dtype float32
+      --api-key ${VLLM_RERANK_API_KEY}
+      ${VLLM_RERANK_EXTRA_ARGS:-}
+    ports:
+      - "${VLLM_RERANK_PORT:-8000}:${VLLM_RERANK_PORT:-8000}"
+    volumes:
+      - vllm_rerank_cache:/root/.cache/huggingface
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'PORT_HEX="$(printf ''%04X'' ${VLLM_RERANK_PORT:-8000})"; cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -q ":$${PORT_HEX} "'
+      interval: 5s
+      timeout: 3s
+      retries: 120
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  vllm_rerank_cache:

@@ -59,6 +59,11 @@ def sidecar_job_to_doc_status_payload(job: SidecarJob) -> dict[str, Any]:
             "sidecar_state": job.status,
             "parser": job.parser,
             "parse_method": job.parse_method,
+            "effective_parser": metadata.get("effective_parser", job.parser),
+            "effective_parse_method": metadata.get(
+                "effective_parse_method", job.parse_method
+            ),
+            "ingestion_route": metadata.get("ingestion_route", "sidecar"),
             "attempt_count": job.attempt_count,
         }
     )

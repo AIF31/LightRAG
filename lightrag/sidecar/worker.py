@@ -10,9 +10,14 @@ from typing import Any
 from lightrag import LightRAG
 from lightrag.api.config import parse_args
 from lightrag.base import DocStatus
+from lightrag.llm.binding_options import OpenAILLMOptions
 from lightrag.llm.openai import openai_complete_if_cache, openai_embed
 from lightrag.sidecar.jobs import SidecarJob, SidecarJobQueue
 from lightrag.utils import EmbeddingFunc, compute_mdhash_id, logger
+
+
+def _openai_llm_kwargs(args) -> dict[str, Any]:
+    return OpenAILLMOptions.options_dict(args)
 
 
 def _create_openai_llm(args):
@@ -22,6 +27,7 @@ def _create_openai_llm(args):
         history_messages: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> str:
+        kwargs.update(_openai_llm_kwargs(args))
         return await openai_complete_if_cache(
             args.llm_model,
             prompt,
@@ -43,6 +49,7 @@ def _create_openai_vision_llm(args):
         image_data: str | None = None,
         **kwargs: Any,
     ) -> str:
+        kwargs.update(_openai_llm_kwargs(args))
         if image_data:
             messages: list[dict[str, Any]] = []
             if system_prompt:
@@ -224,7 +231,9 @@ class SidecarWorker:
         self.args = args
         self.queue = SidecarJobQueue(args.raganything_job_spool_dir)
         self.rag = _create_lightrag(args)
-        self._rag_anything = None
+        self._rag_anything: dict[str, Any] = {}
+        logger.info("Sidecar OpenAI LLM Options: %s", _openai_llm_kwargs(args))
+        logger.info("Sidecar vision model: %s", args.raganything_vision_model)
 
     async def initialize(self) -> None:
         await self.rag.initialize_storages()
@@ -236,8 +245,8 @@ class SidecarWorker:
     async def finalize(self) -> None:
         await self.rag.finalize_storages()
 
-    async def get_raganything(self):
-        if self._rag_anything is None:
+    async def get_raganything(self, parser_name: str):
+        if parser_name not in self._rag_anything:
             try:
                 from raganything import RAGAnything, RAGAnythingConfig
             except ImportError as exc:
@@ -247,13 +256,14 @@ class SidecarWorker:
 
             config = RAGAnythingConfig(
                 working_dir=self.args.working_dir,
-                mineru_parse_method=self.args.raganything_parse_method,
+                parser=parser_name,
+                parse_method=self.args.raganything_parse_method,
                 enable_image_processing=self.args.raganything_enable_image_processing,
                 enable_table_processing=self.args.raganything_enable_table_processing,
                 enable_equation_processing=self.args.raganything_enable_equation_processing,
             )
             try:
-                self._rag_anything = RAGAnything(
+                self._rag_anything[parser_name] = RAGAnything(
                     config=config,
                     lightrag=self.rag,
                     llm_model_func=_create_openai_llm(self.args),
@@ -261,22 +271,26 @@ class SidecarWorker:
                     embedding_func=_create_openai_embedding(self.args),
                 )
             except TypeError:
-                self._rag_anything = RAGAnything(
+                self._rag_anything[parser_name] = RAGAnything(
                     lightrag=self.rag,
-                    llm_model_func=_create_openai_llm(self.args),
                     vision_model_func=_create_openai_vision_llm(self.args),
-                    embedding_func=_create_openai_embedding(self.args),
                 )
-        return self._rag_anything
+        return self._rag_anything[parser_name]
 
     async def process_job(self, job: SidecarJob) -> None:
         logger.info("Processing sidecar job %s for %s", job.job_id, job.original_filename)
-        raganything = await self.get_raganything()
+        raganything = await self.get_raganything(job.parser)
         try:
+            process_kwargs: dict[str, Any] = {}
+            if job.parser == "mineru":
+                for key in ("backend", "device", "table", "formula"):
+                    if key in job.metadata:
+                        process_kwargs[key] = job.metadata[key]
             await raganything.process_document_complete(
                 file_path=job.input_path,
                 output_dir=self.args.raganything_output_dir,
                 parse_method=job.parse_method,
+                **process_kwargs,
             )
             await _update_track_id_for_file(self.rag, job)
             self.queue.mark_done(job)

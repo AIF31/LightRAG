@@ -109,6 +109,71 @@ def _get_sidecar_queue() -> SidecarJobQueue:
     return SidecarJobQueue(getattr(global_args, "raganything_job_spool_dir", "./job_spool"))
 
 
+def _build_mineru_job_metadata() -> dict[str, Any]:
+    return {
+        "backend": getattr(global_args, "raganything_mineru_backend", "pipeline"),
+        "device": getattr(global_args, "raganything_mineru_device", "cpu"),
+        "table": getattr(global_args, "raganything_mineru_table", True),
+        "formula": getattr(global_args, "raganything_mineru_formula", True),
+    }
+
+
+def _resolve_ingestion_policy(file_path: Path) -> dict[str, Any]:
+    ext = file_path.suffix.lower()
+    fast_path_extensions = set(
+        getattr(global_args, "raganything_fast_path_extensions", ())
+    )
+    docling_extensions = set(
+        getattr(global_args, "raganything_docling_extensions", ())
+    )
+    mineru_extensions = set(
+        getattr(global_args, "raganything_mineru_extensions", ())
+    )
+
+    default_parse_method = getattr(global_args, "raganything_parse_method", "auto")
+
+    if ext in fast_path_extensions:
+        return {
+            "route": "pipeline",
+            "parser": None,
+            "parse_method": None,
+            "metadata": {
+                "ingestion_route": "pipeline",
+                "effective_parser": "lightrag",
+                "effective_parse_method": "direct",
+            },
+        }
+
+    if ext in docling_extensions:
+        return {
+            "route": "sidecar",
+            "parser": "docling",
+            "parse_method": default_parse_method,
+            "metadata": {
+                "ingestion_route": "sidecar/docling",
+                "effective_parser": "docling",
+                "effective_parse_method": default_parse_method,
+            },
+        }
+
+    parser = getattr(global_args, "raganything_parser", "mineru")
+    metadata: dict[str, Any] = {
+        "ingestion_route": "sidecar/mineru" if ext in mineru_extensions else "sidecar",
+        "effective_parser": parser,
+        "effective_parse_method": default_parse_method,
+    }
+    if parser == "mineru" or ext in mineru_extensions:
+        parser = "mineru"
+        metadata.update(_build_mineru_job_metadata())
+
+    return {
+        "route": "sidecar",
+        "parser": parser,
+        "parse_method": default_parse_method,
+        "metadata": metadata,
+    }
+
+
 async def _enqueue_sidecar_jobs(
     rag: LightRAG, file_paths: list[Path], track_id: str
 ) -> tuple[int, int]:
@@ -121,14 +186,21 @@ async def _enqueue_sidecar_jobs(
             skipped += 1
             continue
 
+        ingestion_policy = _resolve_ingestion_policy(file_path)
+        if ingestion_policy["route"] != "sidecar":
+            skipped += 1
+            continue
+
+        metadata = dict(ingestion_policy["metadata"])
+        metadata["content_length"] = file_path.stat().st_size
         job = queue.create_job(
             track_id=track_id,
             workspace=rag.workspace,
             input_path=file_path,
             original_filename=file_path.name,
-            parser=getattr(global_args, "raganything_parser", "mineru"),
-            parse_method=getattr(global_args, "raganything_parse_method", "auto"),
-            metadata={"content_length": file_path.stat().st_size},
+            parser=ingestion_policy["parser"],
+            parse_method=ingestion_policy["parse_method"],
+            metadata=metadata,
         )
         queue.enqueue(job)
         enqueued += 1
@@ -1776,6 +1848,35 @@ async def pipeline_index_files(
         logger.error(traceback.format_exc())
 
 
+async def _index_files_with_ingestion_routing(
+    rag: LightRAG, file_paths: list[Path], track_id: str
+) -> None:
+    pipeline_files: list[Path] = []
+    sidecar_files: list[Path] = []
+
+    for file_path in file_paths:
+        ingestion_policy = _resolve_ingestion_policy(file_path)
+        if (
+            _is_raganything_sidecar_enabled()
+            and ingestion_policy["route"] == "sidecar"
+        ):
+            sidecar_files.append(file_path)
+        else:
+            pipeline_files.append(file_path)
+
+    if pipeline_files:
+        await pipeline_index_files(rag, pipeline_files, track_id)
+
+    if sidecar_files:
+        enqueued, skipped = await _enqueue_sidecar_jobs(rag, sidecar_files, track_id)
+        logger.info(
+            "Sidecar routing enqueued %s files and skipped %s duplicates for track %s",
+            enqueued,
+            skipped,
+            track_id,
+        )
+
+
 async def pipeline_index_texts(
     rag: LightRAG,
     texts: List[str],
@@ -1845,7 +1946,7 @@ async def run_scanning_process(
 
             # Process valid files (new files + non-PROCESSED status files)
             if valid_files:
-                await pipeline_index_files(rag, valid_files, track_id)
+                await _index_files_with_ingestion_routing(rag, valid_files, track_id)
                 if processed_files:
                     logger.info(
                         f"Scanning process completed: {len(valid_files)} files Processed {len(processed_files)} skipped."
@@ -2345,18 +2446,24 @@ def create_document_routes(
 
             track_id = generate_track_id("upload")
 
-            if _is_raganything_sidecar_enabled():
+            ingestion_policy = _resolve_ingestion_policy(file_path)
+            if (
+                _is_raganything_sidecar_enabled()
+                and ingestion_policy["route"] == "sidecar"
+            ):
                 queue = _get_sidecar_queue()
+                metadata = dict(ingestion_policy["metadata"])
+                metadata["content_length"] = (
+                    file_size if file_size is not None else bytes_written
+                )
                 job = queue.create_job(
                     track_id=track_id,
                     workspace=rag.workspace,
                     input_path=file_path,
                     original_filename=safe_filename,
-                    parser=getattr(global_args, "raganything_parser", "mineru"),
-                    parse_method=getattr(global_args, "raganything_parse_method", "auto"),
-                    metadata={
-                        "content_length": file_size if file_size is not None else bytes_written
-                    },
+                    parser=ingestion_policy["parser"],
+                    parse_method=ingestion_policy["parse_method"],
+                    metadata=metadata,
                 )
                 queue.enqueue(job)
             else:

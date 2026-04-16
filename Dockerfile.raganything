@@ -11,6 +11,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
+        git \
         libreoffice \
         libgl1 \
         libglib2.0-0 \
@@ -29,7 +30,9 @@ RUN uv sync --frozen --no-dev --extra api --extra offline --no-editable \
     && /app/.venv/bin/python -m pip install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cpu \
         torch==2.11.0 torchvision==0.26.0 \
-    && /app/.venv/bin/python -m pip install --no-cache-dir raganything "mineru[core]"
+    && /app/.venv/bin/python -m pip install --no-cache-dir "mineru[core]" \
+    && /app/.venv/bin/python -m pip install --no-cache-dir \
+        "git+https://github.com/HKUDS/RAG-Anything.git"
 
 ENV PATH=/app/.venv/bin:$PATH
 ENV WORKING_DIR=/app/data/rag_storage
